@@ -1,36 +1,45 @@
-# NetBeans: Open Project dialog freezes ~30 seconds
+# NetBeans delay when open project — Open Project dialog slow / freezes ~30 seconds (Windows fix)
 
-**Symptom:** Click **File → Open Project** → IDE freezes for **exactly ~30 seconds** → then the folder chooser UI finally appears.
+**Fix for: NetBeans is slow or freezes when opening a project, especially when the Open Project dialog takes about 30 seconds to appear.**
 
-- Outside NetBeans, Windows Explorer is fine  
-- Disk I/O is fine (listing `D:\…` takes milliseconds)  
-- Turning off Wi‑Fi does **not** fix it  
-- The IDE looks dead, but it is usually the **UI thread (EDT)** blocked waiting on Windows Shell
+If you searched for any of these, you are in the right place:
 
-This repo documents how we diagnosed and fixed it on **Apache NetBeans 17 + Windows 11 + OneDrive**, so others can debug the same class of bug.
+- **netbeans delay when open project**
+- netbeans open project slow
+- netbeans open project takes long time
+- netbeans open project freezes / hangs / stuck
+- netbeans file open project dialog slow
+- netbeans 30 second delay open project
+- netbeans waiting to open project
+- netbeans freeze on open project windows
+- apache netbeans open project lag
+- netbeans project chooser slow oneDrive
 
 ---
 
-## TL;DR fix (most common)
+## Quick answer (most common fix)
 
-Disable the NetBeans **`dirchooser`** module (custom file dialog that uses Windows `ShellFolder`).
+**Problem:** Click **File → Open Project** → NetBeans freezes ~**30 seconds** → then the folder chooser UI finally shows.
 
-### Option A — script (Windows PowerShell)
+**Cause:** Module `org.netbeans.swing.dirchooser` uses Windows **ShellFolder** (Explorer/OneDrive). The UI thread blocks until that returns.
+
+**Fix:** Disable the **dirchooser** module, restart NetBeans.
+
+### 1-minute fix (PowerShell)
 
 ```powershell
-# From this repo
+git clone https://github.com/Vlantoy/netbeans-open-project-dialog-slow.git
+cd netbeans-open-project-dialog-slow
 .\scripts\disable-dirchooser.ps1
 ```
 
-Then **fully restart** NetBeans (File → Exit) and test **File → Open Project**.
+Then **File → Exit** NetBeans completely, start again, try **File → Open Project**.
 
-### Option B — manual
+### Manual fix (no clone)
 
-Create / edit:
+Create this file (change `17` if your version is different):
 
-`%APPDATA%\NetBeans\<VERSION>\config\Modules\org-netbeans-swing-dirchooser.xml`
-
-Example for NetBeans **17**:
+`%APPDATA%\NetBeans\17\config\Modules\org-netbeans-swing-dirchooser.xml`
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
@@ -45,144 +54,165 @@ Example for NetBeans **17**:
 </module>
 ```
 
-Restart NetBeans. Open Project should show the dialog almost immediately.
+Restart NetBeans. The Open Project dialog should appear in **1–3 seconds**, not 30.
 
-### Revert
+**Undo:** run `.\scripts\enable-dirchooser.ps1` or set `enabled` to `true` / delete the XML.
 
-```powershell
-.\scripts\enable-dirchooser.ps1
+---
+
+## Is this your bug? (symptom checklist)
+
+| Symptom | This fix |
+|--------|----------|
+| Delay happens **before** the Open Project window appears | Yes |
+| Delay is roughly **fixed ~20–40s** (often exactly ~30s) | Yes |
+| Windows Explorer itself is normal speed | Yes |
+| Still slow with Wi‑Fi / network **off** | Yes |
+| IDE looks frozen; mouse works outside NetBeans | Yes |
+| Slow **after** you already picked a project (indexing/Maven) | No → see [docs/other-causes.md](docs/other-causes.md) |
+
+### What people usually say
+
+- “NetBeans delay when I open project”
+- “Open Project freezes NetBeans for half a minute”
+- “Nothing happens when I click Open Project, then suddenly the dialog appears”
+- “NetBeans hangs only on File → Open Project”
+- “Works fine until I open the project chooser”
+
+---
+
+## Why NetBeans is slow to open the project dialog
+
+```
+File → Open Project
+        │
+        ▼
+createProjectChooser()     ← runs on UI thread (EDT)
+        │
+        ▼
+JFileChooser + dirchooser
+        │
+        ▼
+Windows ShellFolder  ← Explorer / OneDrive / icon overlays
+        │
+        ▼
+~30 second hang → dialog finally paints
 ```
 
-Or delete that XML file and restart.
+Apache NetBeans ships a note in the dirchooser module (`MSG_SlownessNote`):
+
+> Dialog seems to be slow, probably because of **JDK bug**.  
+> Try upgrading JDK, remove zip files from Desktop, or run with  
+> **`-J-Dnb.FileChooser.useShellFolder=false`**.
+
+On many PCs (especially **Windows 10/11 + OneDrive Desktop/Documents**), that flag is **not enough**. Disabling **dirchooser** is the reliable fix.
+
+### Triggers that make “open project delay” worse
+
+- Desktop or Documents redirected to **OneDrive**
+- Many shell **icon overlays** (OneDrive, backup tools, etc.)
+- Older/buggy **JDK + ShellFolder** interaction
+- Large/messy Desktop (NetBeans even mentions **zip files on Desktop**)
+
+### What is usually NOT the cause (for this exact symptom)
+
+- Slow HDD listing of `NetBeansProjects` (local list is often only a few ms)
+- Proxy alone (hang often remains **offline**)
+- Maven download (that is *after* you select a project)
+- “Need to reinstall NetBeans” (reinstall rarely fixes ShellFolder hangs)
+
+Full step-by-step debug: **[docs/debug-checklist.md](docs/debug-checklist.md)**
 
 ---
 
-## Why does this happen?
+## Optional steps (if disable dirchooser is not enough)
 
-```
-Click Open Project
-        │
-        ▼
-createProjectChooser()   (runs on EDT / UI thread)
-        │
-        ▼
-JFileChooser + org.netbeans.swing.dirchooser
-        │
-        ▼
-Windows ShellFolder API  ←── Explorer / OneDrive / icon overlays / shell extensions
-        │
-        ▼
-~30s hang  →  dialog finally paints
-```
+1. **JVM flag** (Admin; may help, not always):
 
-NetBeans itself documents this in `org-netbeans-swing-dirchooser` (`MSG_SlownessNote`):
+   ```text
+   -J-Dnb.FileChooser.useShellFolder=false
+   ```
 
-> Dialog seems to be slow, probably because of JDK bug.  
-> Please try to upgrade JDK, remove zip files from Desktop folder or  
-> run with **`-J-Dnb.FileChooser.useShellFolder=false`**.
+   Add to `netbeans_default_options` in `netbeans\etc\netbeans.conf`  
+   Helper: `.\scripts\add-shellfolder-flag.ps1`
 
-On some machines the JVM flag is **not enough**; disabling the whole **dirchooser** module is.
+2. **Measure disk vs dialog:** `.\scripts\measure-fs.ps1`
 
-### What makes a machine “vulnerable”?
+3. **Thread dump while frozen:** `.\scripts\thread-dump-hint.ps1`  
+   Look for `AWT-EventQueue` + `ShellFolder` / `JFileChooser` / `dirchooser`
 
-| Factor | Why it hurts |
-|--------|----------------|
-| Desktop/Documents on **OneDrive** | Default `FileSystemView` home/default dirs go through shell + cloud reparse points |
-| Many **Shell icon overlays** (OneDrive, etc.) | Shell asks overlays when building the dialog |
-| JDK + Windows ShellFolder quirks | Known slow path; NetBeans even ships a “slowness note” |
-| Exact **~30s** delay | Classic “blocked wait / timeout” feel on UI thread, not slow disk |
+4. **Clean userdir test** (does not delete your real settings):
 
-**Not** the usual culprits (we ruled them out while debugging):
+   ```powershell
+   netbeans64.exe --userdir "$env:TEMP\nb-clean" --cachedir "$env:TEMP\nb-clean-cache"
+   ```
 
-- Maven/network download  
-- Proxy PAC alone  
-- Listing the project folder on a local drive  
-- “Project open/index after you pick a folder” (different symptom)
+5. Reinstall NetBeans **without** deleting `%APPDATA%\Roaming\NetBeans`  
+   (settings live there; wiping it is optional factory reset)
 
 ---
 
-## Confirm your symptom matches
+## Side effects of the fix
 
-Answer these:
+| | Before | After disabling dirchooser |
+|--|--------|----------------------------|
+| Open Project speed | Often ~30s freeze | Usually instant |
+| Dialog look | Explorer-like | Plain Swing chooser |
+| Projects, build, debug, Tomcat, JDK | Unchanged | Unchanged |
+| Keymaps / IDE settings | Unchanged | Unchanged |
 
-1. Delay happens **before** the Open Project window appears (not after clicking Open)?  
-2. Delay is roughly **fixed ~20–40s**, often **~30s**?  
-3. Explorer browsing the same folders is fast?  
-4. Airplane mode / offline still slow?
-
-If **yes** → start with **disable dirchooser**.
-
-If delay is **after** choosing a project (indexing, classpath, Maven) → this repo’s fix will **not** help; see [docs/other-causes.md](docs/other-causes.md).
+You only change **how the file/folder dialog is drawn**, not your project code.
 
 ---
 
-## Debug checklist (do this in order)
+## Reinstall FAQ
 
-Full walkthrough: [docs/debug-checklist.md](docs/debug-checklist.md)
-
-Short version:
-
-| Step | Action | If still slow… |
-|------|--------|----------------|
-| 1 | Measure raw folder list time | If list is already multi‑second, fix disk/AV/OneDrive first |
-| 2 | Try `-J-Dnb.FileChooser.useShellFolder=false` in `netbeans.conf` | Next step |
-| 3 | **Disable dirchooser module** (this repo’s main fix) | Next step |
-| 4 | Fresh userdir test: `--userdir %TEMP%\nb-clean` | If clean is fast → corrupt/slow prefs in old userdir |
-| 5 | Thread dump while frozen (`jcmd <pid> Thread.print`) | Look for EDT stuck in `ShellFolder` / `JFileChooser` / `dirchooser` |
-| 6 | Reinstall NetBeans **without** deleting `%APPDATA%\NetBeans` | Last resort; settings live in AppData |
-
-Scripts:
-
-- `scripts/disable-dirchooser.ps1` / `enable-dirchooser.ps1`  
-- `scripts/measure-fs.ps1` — quick local vs OneDrive list timing  
-- `scripts/add-shellfolder-flag.ps1` — optional `netbeans.conf` flag (needs Admin)  
-- `scripts/thread-dump-hint.ps1` — how to capture EDT stacks during the freeze  
+| Question | Answer |
+|----------|--------|
+| Will reinstall fix open-project delay? | Often **no** (same ShellFolder path) |
+| Will reinstall delete my projects? | **No** (projects are your folders) |
+| Will reinstall delete IDE settings? | **No**, unless you delete `%APPDATA%\NetBeans` |
 
 ---
 
-## Side effects of disabling dirchooser
+## Repo contents
 
-| | With dirchooser (default) | Without (fix) |
-|--|---------------------------|-----------------|
-| Open Project UI | Explorer-like, Shell icons | Standard Swing chooser (plainer) |
-| Speed on affected PCs | Can freeze ~30s | Usually instant |
-| Projects / build / Tomcat / JDK | Unchanged | Unchanged |
-| Settings / keymaps | Unchanged | Unchanged |
-
-You only change **how file/folder dialogs look and which Windows Shell path they use**.
-
----
-
-## Does reinstall wipe my setup?
-
-| Data | Location | Uninstall NetBeans app only |
-|------|----------|-----------------------------|
-| Your code | e.g. `D:\NetBeansProjects` | **Safe** |
-| NetBeans UI settings, servers, recent projects | `%APPDATA%\Roaming\NetBeans\<ver>` | **Safe** if you do not delete it |
-| Cache | `%LOCALAPPDATA%\NetBeans\Cache` | Regenerated |
-
-**Only** wiping `AppData\Roaming\NetBeans` loses IDE setup. Reinstalling the program does not require that.
+| Path | Purpose |
+|------|---------|
+| `scripts/disable-dirchooser.ps1` | **Main fix** |
+| `scripts/enable-dirchooser.ps1` | Revert |
+| `scripts/measure-fs.ps1` | Prove disk is fast |
+| `scripts/add-shellfolder-flag.ps1` | Optional conf flag |
+| `scripts/thread-dump-hint.ps1` | Capture freeze stacks |
+| `docs/debug-checklist.md` | Full debug order |
+| `docs/other-causes.md` | Slow *after* open, Maven, index… |
 
 ---
 
-## Environment where this was verified
+## Keywords (for search / SEO)
+
+`netbeans delay when open project`, `netbeans open project slow`, `netbeans open project freezes`, `netbeans open project hangs`, `netbeans open project takes 30 seconds`, `netbeans file open project dialog slow`, `apache netbeans project chooser lag`, `netbeans stuck opening project`, `netbeans freeze windows oneDrive`, `dirchooser ShellFolder`, `nb.FileChooser.useShellFolder`, `netbeans 17 open project delay`
+
+---
+
+## Verified on
 
 - Windows 11  
 - Apache NetBeans **17**  
-- JDK 17  
+- JDK **17**  
 - OneDrive-backed Desktop/Documents  
-- Project folders on local `D:\` were fast to list; dialog creation still hung  
+- Local project tree on `D:\` listed in milliseconds; **dialog still delayed ~30s** until dirchooser disabled  
 
 ---
 
-## Contributing
+## Contributing / “me too”
 
-If this fixed (or did **not** fix) your case, open an Issue with:
+Open an [Issue](https://github.com/Vlantoy/netbeans-open-project-dialog-slow/issues) with:
 
-- NetBeans version, JDK version, OS  
-- Whether OneDrive is on Desktop/Documents  
-- Which step of the checklist fixed it (or failed)  
-- Optional: snippet of `AWT-EventQueue` stack from `jcmd Thread.print` during the freeze  
+- NetBeans version, JDK, Windows version  
+- OneDrive on Desktop/Documents? (yes/no)  
+- Which step fixed it (`disable-dirchooser` / shell flag / other)  
+- Optional: `AWT-EventQueue` lines from `jcmd Thread.print` during freeze  
 
 ---
 
@@ -190,12 +220,14 @@ If this fixed (or did **not** fix) your case, open an Issue with:
 
 MIT — see [LICENSE](LICENSE).
 
-## Tiếng Việt (tóm tắt)
+---
 
-**Triệu chứng:** Bấm Open Project → IDE đơ ~30s mới hiện dialog chọn folder.  
+## Tiếng Việt
 
-**Nguyên nhân:** Module `dirchooser` gọi Windows ShellFolder (Explorer/OneDrive) trên luồng UI.  
+**Lỗi:** NetBeans **chậm / đơ khi mở project** — bấm **File → Open Project** khoảng **30 giây** mới hiện cửa sổ chọn folder.
 
-**Cách fix:** Tắt module `org.netbeans.swing.dirchooser` (script `disable-dirchooser.ps1` hoặc file XML trong `%APPDATA%\NetBeans\17\config\Modules\`). Restart NetBeans.  
+**Nguyên nhân:** Module `dirchooser` gọi Windows ShellFolder (Explorer/OneDrive), block luồng UI.
 
-**Ảnh hưởng:** Dialog hơi “cũ” hơn; không mất project/settings. Chi tiết trong README (English) và `docs/`.
+**Cách sửa:** Tắt module `org.netbeans.swing.dirchooser` bằng script `disable-dirchooser.ps1` hoặc file XML trong `%APPDATA%\NetBeans\17\config\Modules\`, rồi restart NetBeans.
+
+**Không mất** project hay setting IDE. Dialog chọn folder chỉ đổi sang kiểu Swing đơn giản hơn.
